@@ -1,211 +1,165 @@
-﻿using Newtonsoft.Json;
-using Telegram.Bot;
-using Telegram.Bot.Exceptions;
-using Telegram.Bot.Polling;
-using Telegram.Bot.Types;
-using Telegram.Bot.Types.Enums;
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
 
-var botClient = new TelegramBotClient(API_KEY);
+#include <QDebug>
+#include <QtSerialPort/QSerialPortInfo>
+#include <QtSerialPort/QSerialPort>
+#include <QString>
+#include <QtBluetooth/QBluetoothDeviceDiscoveryAgent>
+#include <QtBluetooth/QBluetoothLocalDevice>
 
-using CancellationTokenSource cts = new();
 
-// StartReceiving does not block the caller thread. Receiving is done on the ThreadPool.
-ReceiverOptions receiverOptions = new()
+const QString ADC1_CODE = "41444331";
+const QString ADC2_CODE = "41444332";
+const QString TARGET_CODE = "227d0a0d";
+const QString HEX_PREFIX = "223a2022";
+
+// CRC16 Calculation
+int calculateModBusCRC16(int* data, unsigned short length)
 {
-    AllowedUpdates = Array.Empty<UpdateType>() // receive all update types
-};
+    int crc = 0xFFFF;
 
-botClient.StartReceiving(
-    updateHandler: HandleUpdateAsync,
-    pollingErrorHandler: HandlePollingErrorAsync,
-    receiverOptions: receiverOptions,
-    cancellationToken: cts.Token
-);
-
-var me = await botClient.GetMeAsync();
-
-Console.WriteLine($"Начало обработки сообщений для  @{me.Username}");
-Console.ReadLine();
-
-// Send cancellation request to stop bot
-cts.Cancel();
-
-async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
-{
-    // Only process Message updates: https://core.telegram.org/bots/api#message
-    if (update.Message is not { } message)
-        return;
-    // Only process text messages
-    if (message.Text is not { } messageText)
-        return;
-
-    var chatId = message.Chat.Id;
-    var userName = message.Chat.Username;
-    string wk = DateTime.Today.DayOfWeek.ToString();
-
-    if (wk == "Wednesday")
-    {
-        wk = "Wednesday, ma dudes";
-    }
-
-    TimeSpan msk = DateTime.Now.TimeOfDay;
-    TimeSpan timeInParis = msk.Add(new TimeSpan(-2, 0, 0));
-
-    Console.WriteLine($"Получено сообщение '{messageText}' в чате номер {chatId} от пользователя {userName}.");
-
-    var command = message.Text;
-
-    if (command != null)
-    {
-        if (command == "Какой сегодня день")
-        {
-            Message sentMessage1 = await botClient.SendTextMessageAsync(
-                chatId: chatId,
-                text: $"{wk}",
-                cancellationToken: cancellationToken
-                );
-        }
-        else if (command == "Сколько времени в Париже")
-        {
-            Message sentMessage1 = await botClient.SendTextMessageAsync(
-                chatId: chatId,
-                text: $"В Париже {timeInParis.ToString(@"hh\:mm\:ss")}",
-                cancellationToken: cancellationToken
-                );
-        }
-        else if (command.StartsWith("Upper"))
-        {
-            string up = command.Substring(6);
-            Message sentMessage1 = await botClient.SendTextMessageAsync(
-                chatId: chatId,
-                text: $"{up.ToUpper()}",
-                cancellationToken: cancellationToken
-                );
-        }
-        else if (command.StartsWith("Reverse"))
-        {
-            string up = command.Substring(8);
-            if (up != null)
-            {
-                char[] array = up.ToCharArray();
-                Array.Reverse(array);
-                up = new string(array);
-                Message sentMessage1 = await botClient.SendTextMessageAsync(
-                    chatId: chatId,
-                    text: $"{up}",
-                    cancellationToken: cancellationToken
-                    );
+    for (int i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (unsigned char j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc >>= 1;
+                crc ^= 0xA001;
+            } else {
+                crc >>= 1;
             }
         }
-        else
-        {
-            API animal;
-            switch (command)
-            {
-                case "cat":
-                    animal = new Cat();
-                    break;
-                case "dog":
-                    animal = new Dog();
-                    break;
-                default:
-                    Message sentMessage1 = await botClient.SendTextMessageAsync(
-                        chatId: chatId,
-                        text: "Непонятный запрос",
-                        cancellationToken: cancellationToken
-                        );
-                    return;
-            }
-            Message sentMessage = await botClient.SendPhotoAsync(
-                chatId: chatId,
-                photo: animal.image,
-                caption: animal.type,
-                cancellationToken: cancellationToken
-            );
+    }
+    return crc;
+}
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+    setFixedSize(width(), height());
+    setWindowTitle("Bluetooth.pro/qt 4.8.2");
+
+    QList<QSerialPortInfo> ports = QSerialPortInfo::availablePorts();
+    QStringList portNames;
+    for (const QSerialPortInfo &port : ports) {
+        portNames.append(port.portName());
+    }
+    ui->comboBox->addItems(portNames);
+
+    QStringList adcOptions = { "ADC1", "ADC2" };
+    ui->comboBox_2->addItems(adcOptions);
+}
+
+MainWindow::~MainWindow()
+{
+    serialPort.close();
+    delete ui;
+}
+
+// Slot for handling "Connect" button click
+void MainWindow::on_pushButton_2_clicked()
+{
+    QString selectedPort = ui->comboBox->currentText();
+    serialPort.setPortName(selectedPort);
+
+    if (!serialPort.open(QIODevice::ReadWrite)) {
+        ui->textBrowser->setTextColor(Qt::red);
+        ui->textBrowser->append("Unable to open port in ReadWrite mode.");
+        return;
+    }
+
+    if (!serialPort.isOpen()) {
+        ui->textBrowser->setTextColor(Qt::red);
+        ui->textBrowser->append("Failed to open the serial port.");
+        return;
+    }
+
+    serialPort.setBaudRate(QSerialPort::Baud115200);
+    serialPort.setDataBits(QSerialPort::Data8);
+    serialPort.setStopBits(QSerialPort::OneStop);
+    serialPort.setParity(QSerialPort::NoParity);
+    serialPort.setFlowControl(QSerialPort::NoFlowControl);
+
+    connect(&serialPort, SIGNAL(readyRead()), this, SLOT(receiveMessage()));
+}
+
+// Slot for handling incoming serial messages
+void MainWindow::receiveMessage()
+{
+    QByteArray data = serialPort.readAll();
+    QString hexData = data.toHex();
+    buffer.append(hexData);
+
+    int index = buffer.indexOf(TARGET_CODE);
+
+    if (index != -1) {
+        static int messageCount = 0;
+        messageCount++;
+
+        QString message = buffer.mid(4, index - 4);
+        message.remove(message.indexOf(HEX_PREFIX), HEX_PREFIX.length());
+        QString adcValueHex = message.right(message.size() - 8);
+
+        ui->textBrowser->setTextColor(Qt::blue);
+        ui->textBrowser->append(QString::number(messageCount) + " " + data.left(8) + " " + data.mid(1, 1) + adcValueHex + data.mid(1, 1) + " };");
+
+        bool ok;
+        double conversionFactor = 1.250000000 / 0xFFFFFF;
+        double adcValue = (adcValueHex.toInt(&ok, 16) & 0xFFFFFFF) >> 3;
+        double finalValue = adcValue * conversionFactor;
+        QString adcFinalValue = QString::number(finalValue);
+
+        if (message.mid(0, 8) == ADC1_CODE) {  // ADC1
+            ui->label_10->setText(adcFinalValue);
+        } else if (message.mid(0, 8) == ADC2_CODE) {  // ADC2
+            ui->label_11->setText(adcFinalValue);
         }
+
+        buffer.remove(0, index + TARGET_CODE.size());
     }
 }
 
-Task HandlePollingErrorAsync(ITelegramBotClient botClient, Exception exception, CancellationToken cancellationToken)
+// Slot for handling "Send Message" button click
+void MainWindow::on_pushButton_clicked()
 {
-    var ErrorMessage = exception switch
-    {
-        ApiRequestException apiRequestException
-            => $"Telegram API Error:\n[{apiRequestException.ErrorCode}]\n{apiRequestException.Message}",
-        _ => exception.ToString()
-    };
+    QString message = ui->lineEdit_2->text();
+    QString selectedADC = ui->comboBox_2->currentText();
 
-    Console.WriteLine(ErrorMessage);
-    return Task.CompletedTask;
+    if (selectedADC == "ADC1") {
+        message.prepend("{\"ADC1\": \"");
+    } else if (selectedADC == "ADC2") {
+        message.prepend("{\"ADC2\": \"");
+    }
+
+    ui->textBrowser->setTextColor(Qt::darkGreen);
+    ui->textBrowser->append(message + "\"}");
+
+    serialPort.write((message + "\"}").toUtf8());
 }
 
-
-public interface API
+// Slot for handling "Disconnect" button click
+void MainWindow::on_pushButton_3_clicked()
 {
-    public string image { get; }
-    public string type { get; }
+    serialPort.close();
+    buffer.clear();
 }
 
-public class Dog : API
+// Slot for handling "Clear" button click
+void MainWindow::on_pushButton_5_clicked()
 {
-    static string API_URL = "https://dog.ceo/api/breeds/image/random";
-    private class JsonSchema
-    {
-        public string message { get; set; }
-        public string status { get; set; }
-    }
-    public Dog()
-    {
-        var webClient = new System.Net.WebClient();
-        var json = webClient.DownloadString(API_URL);
-        webClient.Dispose();
-
-        var data = JsonConvert.DeserializeObject<JsonSchema>(json);
-        image = data.message;
-    }
-    public string image { get; }
-    public string type
-    {
-        get
-        {
-            return "Песик";
-        }
-    }
-
+    ui->textBrowser->clear();
 }
 
-public class Cat : API
+// Slot for handling "Refresh Ports" button click
+void MainWindow::on_pushButton_4_clicked()
 {
-    static string API_URL = "https://api.thecatapi.com/v1/images/search";
-    private class JsonSchema
-    {
-        public string id { get; set; }
-        public string url { get; set; }
-        public int width { get; set; }
-        public int height { get; set; }
-
-        [JsonIgnore]
-        public string[] breeds { get; set; }
+    ui->comboBox->clear();
+    QList<QSerialPortInfo> ports = QSerialPortInfo::availablePorts();
+    QStringList portNames;
+    for (const QSerialPortInfo &port : ports) {
+        portNames.append(port.portName());
     }
-    public Cat()
-    {
-        var webClient = new System.Net.WebClient();
-        var json = webClient.DownloadString(API_URL);
-        webClient.Dispose();
-
-        var data = JsonConvert.DeserializeObject<JsonSchema[]>(json)[0];
-        image = data.url;
-    }
-    public string image { get; }
-    public string type
-    {
-        get
-        {
-            return "Котик";
-        }
-    }
-
+    ui->comboBox->addItems(portNames);
 }
-
-
-
